@@ -1,9 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"github.com/PuerkitoBio/goquery"
-	"io"
+	"github.com/go-ini/ini"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -12,21 +13,50 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"crypto/md5"
-	"github.com/go-ini/ini"
 )
 
 
 var OtherOptions map[string]string
 
 var Basedir string
-
-var Host string
+var PathSeparator string
+var Url string
 
 func main() {
-	//设置起始链接
-	//firstUrl := "http://www.gzweixin168.com"
-	getHtml( Host )
+	//检查目标目录是否存在
+	if os.IsPathSeparator('/') {
+		PathSeparator = "/"
+	} else {
+		PathSeparator = "\\"
+	}
+
+	createDir( Basedir )
+
+
+	urls := strings.Split( Url , ",")
+	if len( urls ) > 0 {
+		for _ , v := range urls {
+
+			//分析路径
+			u , err := url.Parse( v )
+			if err != nil {
+				fmt.Println( err )
+				panic(fmt.Sprintf("url %s is not correct" , v ) )
+			}
+
+			childDir := Basedir + PathSeparator + u.Hostname()
+			if u.Port() != "80" && u.Port() != ""  {
+				childDir = childDir + "_" + u.Port()
+			}
+			childDir += PathSeparator
+			createDir( childDir )
+			//抓取页面
+			getHtml( v , childDir )
+		}
+	} else {
+		panic( "url is empty")
+	}
+
 }
 func init(){
 	cfg, err := ini.Load("config.ini")
@@ -34,29 +64,41 @@ func init(){
 		panic("fatal err, can't load ini file")
 	}
 	baseSection := cfg.Section("base")
-	if !baseSection.HasKey("basedir") || !baseSection.HasKey("host"){
-		panic("basedir or host not set")
+	if !baseSection.HasKey("basedir"){
+		panic("basedir not set")
+	}
+	if !baseSection.HasKey("url"){
+		panic("url not set")
 	}
 	Basedir = baseSection.Key("basedir").String()
-	Host = baseSection.Key("host").String()
-	//Basedir = "/Users/kazuma/Desktop/Html"
-	//Host = "http://www.gzweixin168.com"
+	Url = baseSection.Key("url").String()
 	OtherOptions = cfg.Section("others").KeysHash()
 }
 
-func getHtml(htmlUrl string) {
 
-	//flag.Parse()
-	//inputUrl := flag.Arg(0)
+//创建目录
+func createDir ( dir string ) (bool , error) {
+	dirPath := filepath.Dir( dir )
+	if !isExists( dirPath ) {
+		err := os.MkdirAll( dirPath , os.ModePerm)
+		if err != nil {
+			return false , err
+		}
+	}
+	return true , nil
+}
 
-	//parse domain
+func getHtml(htmlUrl string , currentDir string ) {
+
+	//如果解析失败
 	u, err := url.Parse(htmlUrl)
 	if err != nil {
-		log.Fatal(err)
+		panic("url incorrect")
 	}
-	//fmt.Println(u.Scheme)
-	//fmt.Println(u.Host)
-	//fmt.Println(u.Port())
+
+	if u.Host == "" {
+		panic( fmt.Sprintf("Host not find in %s" , htmlUrl ) )
+	}
 
 	rootUrl := u.Scheme + "://" + u.Host
 	if u.Port() != "" {
@@ -64,43 +106,45 @@ func getHtml(htmlUrl string) {
 	}
 	resp, err := http.Get(htmlUrl)
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		log.Fatalf("%s status code error: %d %s \n %s \n", htmlUrl, resp.StatusCode, resp.Status , htmlUrl )
+		panic( fmt.Sprintf( "%s status code error: %d %s \n %s \n", htmlUrl, resp.StatusCode, resp.Status , htmlUrl ) )
 	}
-	//body, err := ioutil.ReadAll(resp.Body)
 
+	//body, err := ioutil.ReadAll(resp.Body)
 	// Load the HTML document
 	doc, err := goquery.NewDocumentFromReader(resp.Body)
 	if err != nil {
-		log.Fatal(err)
+		panic( err )
 	}
-	fmt.Println("start to load included files")
 
+	fmt.Println("start to load included files")
 	// Find the review items
+
+	fmt.Println("get link")
 	doc.Find("link").Each(func(i int, s *goquery.Selection) {
-		fmt.Println("get link")
-		// For each item found, get the band and title
+
 		v, ok := s.Attr("href")
 		if ok {
 			fmt.Printf("Review %d: %s \n", i, v)
 			//download css and write to file
 
-			downloadCss(v, rootUrl, Basedir)
+
+			downloadCss( v, rootUrl , currentDir )
 		}
 
 	})
 
+	fmt.Println("get script")
 	doc.Find("script").Each(func(i int, s *goquery.Selection) {
 		// For each item found, get the band and title
-		fmt.Println("get script")
 		v, ok := s.Attr("src")
 		if ok {
 			fmt.Printf("Review %d: %s \n", i, v)
 			//download css and write to file
-			downloadSrc(v, rootUrl, Basedir)
+			downloadSrc(v, rootUrl, currentDir)
 		}
 
 	})
@@ -112,39 +156,30 @@ func getHtml(htmlUrl string) {
 		if ok {
 			fmt.Printf("Review %d: %s \n", i, v)
 			//download css and write to file
-			downloadSrc(v, rootUrl, Basedir)
+			downloadSrc(v, rootUrl, currentDir )
 		}
 
 	})
 
-
-	//page := filepath.Base(u.Path)
 	path := u.Path
 	query := u.RawQuery
 	query = strings.Replace( query ,"&" , "_" , -1 )
 	query = strings.Replace( query ,"=" , "_" , -1 )
-	//query = strings.Replace( query ,"?" , "_" , -1 )
 
 	if  path == "/" || path == ""{
 		path = "index"
 	}
 
-	path = strings.Replace(path,"/./","_", -1)
-	path = strings.Replace(path,"/","_", -1)
-	path = strings.Replace(path,".","_", -1)
+	createDir( currentDir + path )
+
 	path = path + query +".html"
-	oFile, err := os.Create(Basedir + "/" + path)
+	oFile, err := os.Create( currentDir + PathSeparator + path)
 	if err != nil {
 		log.Fatal(err)
 	}
 	html, err := doc.Html()
 	if err == nil {
-		transferredHtml := htmlLinkReplace(html)
-		for key, val := range OtherOptions{
-			transferredHtml = strings.Replace(transferredHtml, key, val,-1)
-		}
-		oFile.WriteString(transferredHtml)
-		//oFile.WriteString(transferredBody)
+		oFile.WriteString( html )
 
 		//提取页面的图片
 		re, err := regexp.Compile("url\\((.+?)\\)")
@@ -154,73 +189,88 @@ func getHtml(htmlUrl string) {
 
 		allMatch := re.FindAllStringSubmatch(html, -1)
 		for _, v := range allMatch {
-			downloadSrc(v[1], rootUrl, Basedir)
+			downloadSrc(v[1], rootUrl, currentDir )
 		}
 
 	}
-	//创建锁文件
-	en := md5.New()
-	io.WriteString( en , u.RawQuery )
-	md5str2 := fmt.Sprintf("%x", en.Sum(nil))
-	fmt.Println( md5str2 )
-	createLock( md5str2 )
 	fmt.Println("Get Body Success")
-
-	fmt.Println("Get Next Link Start")
-	doc.Find("a").Each(func(i int, s *goquery.Selection) {
-		v, ok := s.Attr("href")
-		if ok {
-			if strings.HasPrefix(v,"http") && !strings.HasPrefix(v,Host){
-				return
-			}
-			//判断这个地址是否已经存在如果存在则跳过 ， 如果不存在则去抓取页面 ， 直到所有的页面获取完比 递归调用
-			if !strings.HasPrefix( v, "http") {
-				if !strings.HasPrefix(v, "/") {
-					v = "/" + v
-				}
-				v = rootUrl + v
-			}
-
-			uv , err := url.Parse( v )
-			if err != nil {
-				log.Fatal( err )
-			}
-
-			fmt.Println( uv.RawQuery )
-			en := md5.New()
-			io.WriteString( en , uv.RawQuery )
-			md5str2 := fmt.Sprintf("%x", en.Sum(nil))
-			fmt.Println( md5str2 )
-			//如果锁不存在则获取数据
-			if !lockExists( md5str2 ) {
-				getHtml( v )
-			}
-		}
-	})
-
-
-
 }
+
+
+/**
+ * 拼合路径
+ */
+
+ func checkUrl( resourceUrl string , rootUrl string ) (string , error ) {
+
+	 u , err := url.Parse( rootUrl )
+	 if err != nil {
+		 return "" , err
+	 }
+
+	 //baseUrl := u.Scheme + "://" + u.Host
+
+	 //如果是自适应型scheme
+	 if strings.HasPrefix( resourceUrl , "://" ) {
+		 resourceUrl = u.Scheme + resourceUrl
+	 }
+
+
+	 //如果是base64位编码的资源也不需要处理 url
+	 if strings.HasPrefix( resourceUrl , "data:image" ) {
+	 	return "" , errors.New("current resource is base64encode , there is no need to download")
+	 }
+
+
+	 //如果是不带Http的请求 需要拼接成完整的url地址
+	 if !strings.HasPrefix(resourceUrl, "http") {
+
+		 ru , err := url.Parse( resourceUrl )
+
+		 if err != nil {
+			 return "" , err
+		 }
+
+		 nResourceUrl := u.ResolveReference( ru )
+
+		 resourceUrl = nResourceUrl.String()
+
+	 }
+	 return resourceUrl , nil
+ }
 
 /**
  * 下载页面的css
  */
 func downloadCss(cssUrl string, rootUrl string, baseDir string) bool {
-	fmt.Println("get css")
-	fullcssUrl := cssUrl
-	if !strings.HasPrefix(fullcssUrl, "http") {
-		if !strings.HasPrefix(fullcssUrl, "/") {
-			fullcssUrl = "/" + fullcssUrl
-		}
-		fullcssUrl = rootUrl + fullcssUrl
+
+	rootUrlParse , err := url.Parse( rootUrl )
+	if err != nil {
+		panic( err )
 	}
+
+	fullcssUrl , err := checkUrl( cssUrl , rootUrl )
+
+	if err != nil {
+		fmt.Println(err)
+		return false
+	}
+
+	baseUrl := rootUrlParse.Scheme + "://" + rootUrlParse.Host
+
+
+	//检查是不是本站资源 ，如果不是则不需要下载
+	if !strings.HasPrefix( fullcssUrl , baseUrl ) {
+		fmt.Sprintf( "current resource is %s , we skip download" , fullcssUrl )
+		return true
+	}
+
 	u, err := url.Parse(fullcssUrl)
 
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 
-	fmt.Println(u.Path)
 	fullPath := baseDir + u.Path
 	if isExists( fullPath ) {
 		return true
@@ -228,7 +278,8 @@ func downloadCss(cssUrl string, rootUrl string, baseDir string) bool {
 	res, err := http.Get(fullcssUrl)
 
 	if err != nil {
-		log.Fatal(err)
+		fmt.Println(err)
+		return false
 
 	}
 	defer res.Body.Close()
@@ -238,55 +289,48 @@ func downloadCss(cssUrl string, rootUrl string, baseDir string) bool {
 	}
 
 	//创建文件
-
-	dirPath := filepath.Dir(fullPath)
-	//检测文件是否存在
-	if !isExists(dirPath) {
-		err := os.MkdirAll(dirPath, os.ModePerm)
+	ok , _ := createDir( fullPath )
+	if ok {
+		oFile, err := os.Create(fullPath)
 		if err != nil {
-			//产生错误
-			fmt.Println(err)
+			log.Fatal(err)
+		}
+		body, err := ioutil.ReadAll(res.Body)
+		oFile.Write(body)
+
+		//download css里面的图片资源
+		content := string(body)
+		re, err := regexp.Compile("url\\((.+?)\\)")
+		if err != nil {
 			log.Fatal(err)
 		}
 
-	}
-
-	oFile, err := os.Create(fullPath)
-	if err != nil {
-		log.Fatal(err)
-	}
-	body, err := ioutil.ReadAll(res.Body)
-	oFile.Write(body)
-
-	content := string(body)
-	re, err := regexp.Compile("url\\((.+?)\\)")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	allMatch := re.FindAllStringSubmatch(content, -1)
-	for _, v := range allMatch {
-		if strings.HasPrefix(v[1], "/") {
-			downloadSrc(v[1], rootUrl, Basedir)
-		} else {
-			dir := filepath.Dir(cssUrl)
-			downloadSrc(dir+"/"+v[1], rootUrl, Basedir)
+		allMatch := re.FindAllStringSubmatch(content, -1)
+		for _, v := range allMatch {
+			//检查资源是否是路径 ，如果不是则不下载
+			downloadSrc(v[1], fullcssUrl , Basedir)
 		}
 
+		return true
 	}
-
 	return true
 }
 
 func downloadSrc(js string, rootUrl string, baseDir string) bool {
 	//check js has scheme
-	fmt.Println("get js")
-	if !strings.HasPrefix(js, "http") {
-		if !strings.HasPrefix(js, "/") {
-			js = "/" + js
-		}
-		js = rootUrl + js
+	js , err := checkUrl( js , rootUrl )
+
+	if err != nil {
+		fmt.Println(err)
+		return false
 	}
+
+	//检查是不是本站资源 ，如果不是则不需要下载
+	if !strings.HasPrefix( js , rootUrl ) {
+		fmt.Sprintf( "current resource is %s , we skip download" , js )
+		return true
+	}
+
 	u, err := url.Parse(js)
 
 	if err != nil {
@@ -344,59 +388,4 @@ func isExists(path string) bool {
 		return false
 	}
 	return true
-
 }
-
-func lockExists( v string ) bool {
-	fmt.Println( v )
-	fullPath := Basedir + "/lock/" + v
-	//检测文件是否存在
-	if !isExists(fullPath) {
-		return false
-	}
-	return true
-}
-
-func createLock( v string ) bool {
-	fullPath := Basedir + "/lock/" + v
-	fmt.Println( fullPath )
-	dirPath := filepath.Dir(fullPath)
-	//检测文件是否存在
-	if !isExists(dirPath) {
-		err := os.MkdirAll(dirPath, os.ModePerm)
-		if err != nil {
-			//产生错误
-			fmt.Println(err)
-			log.Fatal(err)
-		}
-	}
-	f , err := os.Create(fullPath)
-	fmt.Println( "lock file : " + fullPath )
-	if err != nil {
-		log.Fatal(err)
-	}
-	f.WriteString( "ok" )
-	f.Close()
-	return true
-}
-
-func htmlLinkReplace(htmlBody string,) (string) {
-	//替换规则:先将所有的
-	re := regexp.MustCompile(`(?s)href="([\S]+?)"`)
-	transferredBody := re.ReplaceAllStringFunc(htmlBody, func(s string) string {
-		s = re.ReplaceAllString(s,"$1")
-		s = strings.Replace(s,"./","_", -1)
-		s = strings.Replace(s,"/","_", -1)
-		s = strings.Replace(s,".","_", -1)
-		s = strings.Replace(s, "&amp;", "_",-1)
-		s = strings.Replace(s, "=", "_",-1)
-		s = strings.Replace(s, "?", "",-1)
-		fmt.Println("transffered link is", "href=\"index"+s+".html\"")
-		if s == "_"{
-			s = "index"
-		}
-		return "href=\""+s+".html\""
-	})
-	return transferredBody
-}
-
